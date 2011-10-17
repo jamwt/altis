@@ -14,7 +14,7 @@ data StringOrNull = StringResponse S.ByteString
 
 data AltisResponse = AltisErrorResponse S.ByteString
                    | AltisLineResponse S.ByteString
-                   | AltisIntResponse Integer
+                   | AltisIntResponse Int
                    | AltisBulkResponse StringOrNull
                    | AltisMultiBulkResponse [StringOrNull]
     deriving (Show)

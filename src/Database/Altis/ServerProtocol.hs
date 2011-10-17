@@ -1,6 +1,7 @@
 module Database.Altis.ServerProtocol where
 
 import qualified Data.Map as M
+import Data.Monoid (mappend, mconcat)
 import Network.Socket
 import qualified Network.Socket.ByteString as BinSock
 import Network.BSD
@@ -16,12 +17,16 @@ import Data.Attoparsec.Enumerator (iterParser)
 import System.IO (hSetBuffering, hClose, BufferMode(..), 
     IOMode(..), Handle)
 import Data.Char (ord, chr)
-import Data.Binary.Put (runPut, Put, putByteString)
+--import Data.Binary.Put (runPut, Put, putByteString)
+import Blaze.ByteString.Builder.ByteString (copyByteString, fromByteString)
+import Blaze.ByteString.Builder (toByteStringIO, Builder)
+import Data.Word (Word8)
 
 import Data.Enumerator (yield, continue, Iteratee, Stream(..))
 import qualified Data.Attoparsec as Atto
 import qualified Data.Attoparsec.Char8 as AttoC
 import qualified Data.ByteString.Char8 as S
+import qualified Data.ByteString as WS
 import qualified Data.ByteString.Lazy.Char8 as B
 
 import Database.Altis.Storage
@@ -42,8 +47,7 @@ requestHandler db s = do
 processRequest :: AltisDataset -> Socket -> AltisRequest -> IO ()
 processRequest db s req = do
     response <- command db req
-    let out = S.concat $ B.toChunks $ runPut $ putRedisResponse response
-    BinSock.sendAll s out
+    toByteStringIO (BinSock.sendAll s) $ putAltisResponse response
 
 upperBs :: S.ByteString -> S.ByteString
 upperBs s = S.map wordUpper s
@@ -107,32 +111,57 @@ runAltisServer db = do
     bindSocket s (SockAddrInet 6001 iNADDR_ANY)
     void $ forkIO $ serverListenLoop db s
 
-putRedisResponse :: AltisResponse -> Put 
-putRedisResponse (AltisBulkResponse NullResponse) = putByteString "$-1\r\n"
-putRedisResponse (AltisBulkResponse (StringResponse s)) = do
-    putByteString "$"
-    putByteString (S.pack $ show $ S.length s)
-    putByteString "\r\n"
-    putByteString s
-    putByteString "\r\n"
+putDecimal' :: Int -> [Word8]
+putDecimal' 0 = []
+putDecimal' i = ((fromIntegral f) + 48) : putDecimal' (fromIntegral r)
+  where
+    (r, f) = i `divMod` 10
+{-# INLINE putDecimal' #-}
 
-putRedisResponse (AltisLineResponse s) = do
-    putByteString "+"
-    putByteString s
-    putByteString "\r\n"
+putDecimal :: Int -> S.ByteString
+putDecimal i | i < 0     = WS.pack $ (45 :: Word8) : (reverse $ putDecimal' $ abs i)
+             | otherwise = WS.pack $ reverse $ putDecimal' i
 
-putRedisResponse (AltisErrorResponse s) = do
-    putByteString "-"
-    putByteString s
-    putByteString "\r\n"
+{-# INLINE putDecimal #-}
 
-putRedisResponse (AltisIntResponse i) = do
-    putByteString ":"
-    putByteString $ S.pack $ show i
-    putByteString "\r\n"
+putAltisResponse :: AltisResponse -> Builder
+putAltisResponse (AltisBulkResponse NullResponse) = copyByteString "$-1\r\n"
+putAltisResponse (AltisBulkResponse (StringResponse s)) = mconcat [
+    copyByteString "$",
+    copyByteString $ putDecimal $ S.length s,
+    copyByteString "\r\n",
+    fromByteString s, 
+    copyByteString "\r\n"
+    ]
 
-putRedisResponse (AltisMultiBulkResponse xs) = do
-    putByteString "*"
-    putByteString (S.pack $ show $ length xs)
-    putByteString "\r\n"
-    mapM_ (putRedisResponse . AltisBulkResponse) xs
+putAltisResponse (AltisLineResponse s) = mconcat [
+    copyByteString "+", 
+    copyByteString s,
+    copyByteString "\r\n"
+    ]
+
+putAltisResponse (AltisErrorResponse s) = mconcat [
+    copyByteString "-",
+    copyByteString s,
+    copyByteString "\r\n"
+    ]
+
+putAltisResponse (AltisIntResponse i) = mconcat [
+    copyByteString ":",
+    copyByteString $ putDecimal i,
+    copyByteString "\r\n"
+    ]
+
+putAltisResponse (AltisMultiBulkResponse xs) = (mconcat [
+    copyByteString "*",
+    copyByteString $ putDecimal $ length xs,
+    copyByteString "\r\n"
+    ] ) `mappend` runSubs xs
+  where
+    runSubs :: [StringOrNull] -> Builder
+    runSubs subs = mconcat $ map runsub subs
+
+    runsub :: StringOrNull -> Builder
+    runsub s = putAltisResponse (AltisBulkResponse s)
+
+{-# INLINE putAltisResponse #-}
