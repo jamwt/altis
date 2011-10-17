@@ -2,7 +2,7 @@ module Database.Altis.ServerProtocol where
 
 import qualified Data.Map as M
 import Network.Socket
-import qualified Network.Socket.ByteString.Lazy as BinSock
+import qualified Network.Socket.ByteString as BinSock
 import Network.BSD
 import Control.Exception (finally)
 import Control.Monad (forever, liftM, replicateM, void)
@@ -20,6 +20,7 @@ import Data.Binary.Put (runPut, Put, putByteString)
 
 import Data.Enumerator (yield, continue, Iteratee, Stream(..))
 import qualified Data.Attoparsec as Atto
+import qualified Data.Attoparsec.Char8 as AttoC
 import qualified Data.ByteString.Char8 as S
 import qualified Data.ByteString.Lazy.Char8 as B
 
@@ -41,7 +42,7 @@ requestHandler db s = do
 processRequest :: AltisDataset -> Socket -> AltisRequest -> IO ()
 processRequest db s req = do
     response <- command db req
-    let out = runPut $ putRedisResponse response
+    let out = S.concat $ B.toChunks $ runPut $ putRedisResponse response
     BinSock.sendAll s out
 
 upperBs :: S.ByteString -> S.ByteString
@@ -71,8 +72,9 @@ readArg = do
 
 readIntLine :: Atto.Parser Int
 readIntLine = do
-    line <- readLineContents
-    return $ read $ S.unpack line
+    i <- AttoC.decimal
+    _ <- Atto.string "\r\n"
+    return i
 
 readLineContents :: Atto.Parser S.ByteString
 readLineContents = do
